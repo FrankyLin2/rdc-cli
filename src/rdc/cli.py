@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 import click
 
@@ -74,6 +75,14 @@ def _set_session_env(ctx: click.Context, param: click.Parameter, value: str | No
     os.environ["RDC_SESSION"] = value
 
 
+def _fix_win_encoding() -> None:
+    """Prevent UnicodeEncodeError on Windows cp1252 terminals (B77)."""
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(errors="replace")
+
+
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(version=__version__, prog_name="rdc")
 @click.option(
@@ -87,6 +96,12 @@ def _set_session_env(ctx: click.Context, param: click.Parameter, value: str | No
 )
 def main() -> None:
     """rdc: Unix-friendly CLI for RenderDoc captures."""
+
+
+def entry() -> None:
+    """Console script entry point — reconfigure encoding before Click parses argv."""
+    _fix_win_encoding()
+    main()
 
 
 main.add_command(doctor_cmd, name="doctor")
@@ -157,4 +172,4 @@ main.add_command(setup_renderdoc_cmd, name="setup-renderdoc")
 
 
 if __name__ == "__main__":
-    main()
+    entry()
