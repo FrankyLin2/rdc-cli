@@ -12,6 +12,7 @@ from rdc.services.query_service import (
     _build_pass_list,
     _friendly_pass_name,
     aggregate_stats,
+    build_synthetic_pass_list,
     filter_by_pass,
     filter_by_pattern,
     filter_by_type,
@@ -131,6 +132,11 @@ class TestWalkActions:
         by_eid = {a.eid: a for a in walk_actions(_build_action_tree())}
         assert by_eid[10].depth == 0
         assert by_eid[42].depth == 1
+
+    def test_marker_stack_preserved(self):
+        by_eid = {a.eid: a for a in walk_actions(_build_action_tree())}
+        assert by_eid[42].marker_stack == ["Shadow/Terrain"]
+        assert by_eid[98].marker_stack == ["GBuffer/Floor"]
 
 
 class TestFilterByType:
@@ -500,6 +506,106 @@ class TestBuildPassListFriendlyNames:
         assert len(passes) == 2
         assert passes[0]["name"] == "Colour Pass #1 (1 Target)"
         assert passes[1]["name"] == "Colour Pass #2 (1 Target)"
+
+
+def _build_gles_marker_tree() -> list[ActionDescription]:
+    """GL/GLES-style marker-only tree with no BeginPass/EndPass boundaries."""
+
+    prepass_draw = ActionDescription(
+        eventId=123,
+        flags=ActionFlags.Drawcall | ActionFlags.Indexed,
+        numIndices=216,
+        numInstances=36,
+        _name="glDrawElementsInstanced",
+    )
+    prepass_marker = ActionDescription(
+        eventId=102,
+        flags=ActionFlags.PushMarker,
+        _name="RenderFunRVT_PrePass",
+        children=[
+            ActionDescription(eventId=107, flags=ActionFlags.Clear, _name="glClear"),
+            prepass_draw,
+        ],
+    )
+
+    opaque_draw1 = ActionDescription(
+        eventId=166,
+        flags=ActionFlags.Drawcall | ActionFlags.Indexed,
+        numIndices=1872,
+        numInstances=1,
+        _name="glDrawElements",
+    )
+    opaque_draw2 = ActionDescription(
+        eventId=187,
+        flags=ActionFlags.Drawcall | ActionFlags.Indexed,
+        numIndices=1740,
+        numInstances=1,
+        _name="glDrawElements",
+    )
+    renderloop_marker = ActionDescription(
+        eventId=138,
+        flags=ActionFlags.PushMarker,
+        _name="RenderLoop.Draw",
+        children=[opaque_draw1, opaque_draw2],
+    )
+    opaque_marker = ActionDescription(
+        eventId=137,
+        flags=ActionFlags.PushMarker,
+        _name="DrawOpaqueObjects",
+        children=[renderloop_marker],
+    )
+
+    post_draw = ActionDescription(
+        eventId=929,
+        flags=ActionFlags.Drawcall | ActionFlags.Indexed,
+        numIndices=6,
+        numInstances=1,
+        _name="glDrawElements",
+    )
+    uber_marker = ActionDescription(
+        eventId=906,
+        flags=ActionFlags.PushMarker,
+        _name="UberPostProcess",
+        children=[
+            ActionDescription(
+                eventId=918,
+                flags=ActionFlags.Clear,
+                _name="glInvalidateFramebuffer",
+            ),
+            post_draw,
+        ],
+    )
+
+    return [prepass_marker, opaque_marker, uber_marker]
+
+
+class TestSyntheticPassList:
+    def test_marker_only_tree_builds_synthetic_passes(self) -> None:
+        passes = build_synthetic_pass_list(walk_actions(_build_gles_marker_tree()))
+        assert [p["name"] for p in passes] == [
+            "RenderFunRVT_PrePass",
+            "DrawOpaqueObjects",
+            "UberPostProcess",
+        ]
+
+    def test_prefers_semantic_outer_marker_over_leaf_draw_marker(self) -> None:
+        passes = build_synthetic_pass_list(walk_actions(_build_gles_marker_tree()))
+        opaque = next(p for p in passes if p["name"] == "DrawOpaqueObjects")
+        assert opaque["begin_eid"] <= 166 <= opaque["end_eid"]
+        assert opaque["draws"] == 2
+
+    def test_empty_when_no_marker_groups(self) -> None:
+        flat = walk_actions(
+            [
+                ActionDescription(
+                    eventId=1,
+                    flags=ActionFlags.Drawcall | ActionFlags.Indexed,
+                    numIndices=3,
+                    _name="glDrawElements",
+                )
+            ]
+        )
+        assert build_synthetic_pass_list(flat) == []
 
 
 # ---------------------------------------------------------------------------

@@ -155,3 +155,68 @@ class TestDrawsSummaryFiltered:
         # 5 draws, 2 dispatches — summary must report all 5 draws, not 7
         assert summary.startswith("5 draw calls"), f"Got: {summary!r}"
         assert "2 dispatches" in summary
+
+
+def _build_gl_marker_actions() -> list:
+    draw_a = rd.ActionDescription(
+        eventId=20,
+        flags=rd.ActionFlags.Drawcall | rd.ActionFlags.Indexed,
+        numIndices=3,
+        _name="glDrawElements",
+    )
+    draw_b = rd.ActionDescription(
+        eventId=25,
+        flags=rd.ActionFlags.Drawcall | rd.ActionFlags.Indexed,
+        numIndices=3,
+        _name="glDrawElements",
+    )
+    draw_c = rd.ActionDescription(
+        eventId=40,
+        flags=rd.ActionFlags.Drawcall | rd.ActionFlags.Indexed,
+        numIndices=3,
+        _name="glDrawElements",
+    )
+    return [
+        rd.ActionDescription(
+            eventId=10,
+            flags=rd.ActionFlags.PushMarker,
+            _name="DrawOpaqueObjects",
+            children=[
+                rd.ActionDescription(
+                    eventId=11,
+                    flags=rd.ActionFlags.PushMarker,
+                    _name="RenderLoop.Draw",
+                    children=[draw_a, draw_b],
+                )
+            ],
+        ),
+        rd.ActionDescription(
+            eventId=30,
+            flags=rd.ActionFlags.PushMarker,
+            _name="UberPostProcess",
+            children=[draw_c],
+        ),
+    ]
+
+
+class TestSyntheticPassFallback:
+    def test_draws_uses_synthetic_pass_name_when_no_beginpass(self) -> None:
+        state = _make_state(actions=_build_gl_marker_actions())
+        resp, _ = _handle_request(rpc_request("draws"), state)
+        names = {d["pass"] for d in resp["result"]["draws"]}
+        assert "DrawOpaqueObjects" in names
+        assert "UberPostProcess" in names
+        assert "RenderLoop.Draw" not in names
+
+    def test_passes_returns_synthetic_passes_when_no_beginpass(self) -> None:
+        state = _make_state(actions=_build_gl_marker_actions())
+        resp, _ = _handle_request(rpc_request("passes"), state)
+        passes = resp["result"]["tree"]["passes"]
+        assert [p["name"] for p in passes] == ["DrawOpaqueObjects", "UberPostProcess"]
+
+    def test_pass_filter_works_with_synthetic_pass_name(self) -> None:
+        state = _make_state(actions=_build_gl_marker_actions())
+        resp, _ = _handle_request(rpc_request("draws", {"pass": "DrawOpaqueObjects"}), state)
+        draws = resp["result"]["draws"]
+        assert len(draws) == 2
+        assert {d["eid"] for d in draws} == {20, 25}

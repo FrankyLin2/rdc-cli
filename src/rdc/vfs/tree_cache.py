@@ -14,7 +14,7 @@ from rdc.services.query_service import (
     _DISPATCH,
     _DRAWCALL,
     STAGE_MAP,
-    _build_pass_list,
+    get_effective_pass_list,
     walk_actions,
 )
 
@@ -138,7 +138,7 @@ def build_vfs_skeleton(
 
     draw_eids = [str(a.eid) for a in flat if a.flags & (_DRAWCALL | _DISPATCH)]
     event_eids = [str(a.eid) for a in flat]
-    pass_list = _build_pass_list(actions, sf)
+    pass_list = get_effective_pass_list(actions, sf, flat=flat)
     tree.pass_list = pass_list
     pass_names = [p["name"] for p in pass_list]
     resource_ids = [str(int(getattr(r, "resourceId", 0))) for r in resources]

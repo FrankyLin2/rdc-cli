@@ -55,6 +55,7 @@ class FlatAction:
     num_instances: int = 1
     depth: int = 0
     parent_marker: str = "-"
+    marker_stack: list[str] = field(default_factory=list)
     pass_name: str = "-"
     events: list[Any] = field(default_factory=list)
 
@@ -94,8 +95,10 @@ def walk_actions(
     depth: int = 0,
     current_pass: str = "-",
     parent_marker: str = "-",
+    marker_stack: list[str] | None = None,
 ) -> list[FlatAction]:
     """Walk action tree and return flattened list with metadata."""
+    current_markers = list(marker_stack or [])
     result = []
     for a in actions:
         name = a.GetName(sf) if sf is not None else getattr(a, "_name", "")
@@ -112,13 +115,33 @@ def walk_actions(
             num_instances=max(a.numInstances, 1),
             depth=depth,
             parent_marker=parent_marker,
+            marker_stack=list(current_markers),
             pass_name=current_pass,
             events=list(a.events) if a.events else [],
         )
         result.append(flat)
 
         if a.children:
-            marker = name if not (flags & _BEGIN_PASS) else parent_marker
+            child_markers = list(current_markers)
+            is_marker_like = bool(flags & _PUSH_MARKER) or (
+                bool(a.children)
+                and not (
+                    flags
+                    & (
+                        _BEGIN_PASS
+                        | _END_PASS
+                        | _CMD_BUFFER
+                        | _DRAWCALL
+                        | _MESHDRAW
+                        | _DISPATCH
+                        | _CLEAR
+                        | _COPY
+                    )
+                )
+            )
+            if is_marker_like:
+                child_markers.append(name)
+            marker = child_markers[-1] if child_markers else parent_marker
             result.extend(
                 walk_actions(
                     a.children,
@@ -126,6 +149,7 @@ def walk_actions(
                     depth=depth + 1,
                     current_pass=current_pass,
                     parent_marker=marker,
+                    marker_stack=child_markers,
                 )
             )
 
@@ -162,10 +186,12 @@ def filter_by_pass(
     `a.pass_name` string comparison when no pass matches or `actions` is None.
     """
     if actions is not None:
-        passes = _build_pass_list(actions, sf)
-        target = next((p for p in passes if p["name"].lower() == pass_name.lower()), None)
-        if target:
-            return [a for a in flat if target["begin_eid"] <= a.eid <= target["end_eid"]]
+        passes = get_effective_pass_list(actions, sf, flat=flat)
+        targets = [p for p in passes if p["name"].lower() == pass_name.lower()]
+        if targets:
+            return [
+                a for a in flat if any(t["begin_eid"] <= a.eid <= t["end_eid"] for t in targets)
+            ]
     lower = pass_name.lower()
     return [a for a in flat if a.pass_name.lower() == lower]
 
@@ -444,7 +470,7 @@ def get_resource_detail(adapter: Any, resid: int) -> dict[str, Any] | None:
 
 def get_pass_hierarchy(actions: list[Any], sf: Any = None) -> dict[str, Any]:
     """Get render pass hierarchy from actions."""
-    enriched = _build_pass_list(actions, sf)
+    enriched = get_effective_pass_list(actions, sf)
     return {"passes": [{"name": p["name"], "draws": p["draws"]} for p in enriched]}
 
 
@@ -545,6 +571,82 @@ def pass_name_for_eid(eid: int, passes: list[dict[str, Any]]) -> str:
         if p["begin_eid"] <= eid <= p["end_eid"]:
             return str(p["name"])
     return "-"
+
+
+_SYNTHETIC_MARKER_IGNORE = frozenset(
+    {
+        "RenderLoop.Draw",
+        "RenderLoopNewBatcher.Draw",
+        "Canvas.RenderSubBatch",
+        "GUITexture.Draw",
+        "ScriptableRenderPass.Configure",
+        "glPopDebugGroup()",
+    }
+)
+
+
+def _synthetic_pass_name_for_action(a: FlatAction) -> str | None:
+    if a.pass_name != "-":
+        return a.pass_name
+    for name in reversed(a.marker_stack):
+        if name not in _SYNTHETIC_MARKER_IGNORE and not name.startswith("glPopDebugGroup"):
+            return name
+    return None
+
+
+def build_synthetic_pass_list(flat: list[FlatAction]) -> list[dict[str, Any]]:
+    """Infer pseudo-passes from marker stacks when the API has no BeginPass events."""
+    passes: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+
+    def _finish() -> None:
+        nonlocal current
+        if current is not None and (current["draws"] > 0 or current["dispatches"] > 0):
+            passes.append(current)
+        current = None
+
+    for a in flat:
+        name = _synthetic_pass_name_for_action(a)
+        if name is None:
+            _finish()
+            continue
+        if current is None or current["name"] != name:
+            _finish()
+            current = {
+                "name": name,
+                "begin_eid": a.eid,
+                "end_eid": a.eid,
+                "draws": 0,
+                "dispatches": 0,
+                "triangles": 0,
+                "synthetic": True,
+            }
+        else:
+            current["end_eid"] = a.eid
+
+        current["begin_eid"] = min(current["begin_eid"], a.eid)
+        current["end_eid"] = max(current["end_eid"], a.eid)
+        if a.flags & (_DRAWCALL | _MESHDRAW):
+            current["draws"] += 1
+            current["triangles"] += _triangles_for_action(a)
+        elif a.flags & _DISPATCH:
+            current["dispatches"] += 1
+
+    _finish()
+    return passes
+
+
+def get_effective_pass_list(
+    actions: list[Any],
+    sf: Any = None,
+    *,
+    flat: list[FlatAction] | None = None,
+) -> list[dict[str, Any]]:
+    """Return real passes when available, otherwise synthetic passes."""
+    passes = _build_pass_list(actions, sf)
+    if passes:
+        return passes
+    return build_synthetic_pass_list(flat if flat is not None else walk_actions(actions, sf))
 
 
 def _build_pass_list(actions: list[Any], sf: Any = None) -> list[dict[str, Any]]:

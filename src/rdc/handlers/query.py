@@ -401,11 +401,18 @@ def _handle_draws(
         aggregate_stats,
         filter_by_pass,
         filter_by_type,
+        get_effective_pass_list,
         pass_name_for_eid,
     )
 
     all_flat = _get_flat_actions(state)
     passes = state.vfs_tree.pass_list if state.vfs_tree else []
+    if not passes:
+        passes = get_effective_pass_list(
+            state.adapter.get_root_actions(),
+            state.structured_file,
+            flat=all_flat,
+        )
     pass_name = params.get("pass")
     if pass_name:
         _actions = state.adapter.get_root_actions()
