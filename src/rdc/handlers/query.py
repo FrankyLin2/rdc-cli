@@ -35,6 +35,73 @@ def _get_flat_actions(state: DaemonState) -> list[Any]:
     return ds._get_flat_actions(state)
 
 
+def _collect_tbr_snapshots(state: DaemonState, actions: list[Any]) -> dict[int, dict[str, Any]]:
+    """Collect conservative attachment snapshots for draw/dispatch events."""
+    snapshots: dict[int, dict[str, Any]] = {}
+    if state.adapter is None:
+        return snapshots
+    for action in actions:
+        flags = int(getattr(action, "flags", 0))
+        if not (flags & (0x0001 | 0x0002 | 0x0004 | 0x0008 | 0x0400 | 0x0800 | 0x1000)):
+            continue
+        eid = int(getattr(action, "eid", getattr(action, "eventId", 0)))
+        if eid <= 0:
+            continue
+        err = _seek_replay(state, eid)
+        if err:
+            continue
+        pipe = state.adapter.get_pipeline_state()
+        colors = [
+            {"slot": index, "resource_id": int(target.resource)}
+            for index, target in enumerate(pipe.GetOutputTargets())
+            if int(target.resource) != 0
+        ]
+        depth_target = pipe.GetDepthTarget()
+        depth_id = int(depth_target.resource)
+        load_store_tokens: list[str] = []
+        if flags & 0x0001:
+            load_store_tokens.append("clear")
+        if flags & 0x0400:
+            load_store_tokens.append("copy")
+        if flags & 0x1000:
+            load_store_tokens.append("genmips")
+        if flags & 0x0800:
+            load_store_tokens.append("resolve")
+        load_store_tokens.append(f"attachments:{len(colors)}:{1 if depth_id != 0 else 0}")
+        resolve_key = "resolve" if flags & 0x0800 else "none"
+        snapshots[eid] = {
+            "eid": eid,
+            "colors": colors,
+            "depth": None if depth_id == 0 else {"resource_id": depth_id},
+            "framebuffer_key": tuple((item["slot"], item["resource_id"]) for item in colors),
+            "load_store_key": "|".join(load_store_tokens),
+            "resolve_key": resolve_key,
+        }
+    return snapshots
+
+
+def _effective_tbr_passes(state: DaemonState, actions: list[Any]) -> list[dict[str, Any]]:
+    from rdc.services.query_service import get_effective_pass_list
+
+    return get_effective_pass_list(
+        state.adapter.get_root_actions(),  # type: ignore[union-attr]
+        state.structured_file,
+        flat=actions,
+    )
+
+
+def _enrich_tbr_actions_with_pass_names(
+    actions: list[Any],
+    passes: list[dict[str, Any]],
+) -> list[Any]:
+    from rdc.services.query_service import pass_name_for_eid
+
+    for action in actions:
+        if getattr(action, "pass_name", "-") == "-":
+            action.pass_name = pass_name_for_eid(int(action.eid), passes)
+    return actions
+
+
 def _handle_shader_map(
     request_id: int, params: dict[str, Any], state: DaemonState
 ) -> tuple[dict[str, Any], bool]:
@@ -665,6 +732,53 @@ def _handle_pass_attachment(
     return _error_response(request_id, -32001, f"unknown attachment: {attachment}"), True
 
 
+def _handle_tbr_analysis(
+    request_id: int, params: dict[str, Any], state: DaemonState
+) -> tuple[dict[str, Any], bool]:
+    assert state.adapter is not None
+    from rdc.services.query_service import walk_actions
+    from rdc.services.tbr_analysis import build_tbr_analysis
+
+    debug_mode = bool(params.get("debug", False))
+    original_eid = state.current_eid
+    actions = walk_actions(state.adapter.get_root_actions(), state.structured_file)
+    passes = _effective_tbr_passes(state, actions)
+    actions = _enrich_tbr_actions_with_pass_names(actions, passes)
+    snapshots = _collect_tbr_snapshots(state, actions)
+    actions = [action for action in actions if int(action.eid) in snapshots]
+    usage_data: dict[int, list[Any]] = {}
+    for resid, rid_obj in state.res_rid_map.items():
+        usage_data[resid] = state.adapter.controller.GetUsage(rid_obj.resourceId)
+    external_resources = {
+        resid
+        for resid, resource_type in state.res_types.items()
+        if str(resource_type) == "SwapchainImage"
+    }
+    result = build_tbr_analysis(
+        actions,
+        snapshots,
+        usage_data,
+        capture=state.capture,
+        current_eid=original_eid,
+        external_resources=external_resources,
+    )
+    result["summary"] = {
+        "segment_count": len(result.get("segments", [])),
+        "switch_count": len(result.get("rt_switches", [])),
+        "candidate_count": len(result.get("optimization_candidates", [])),
+        "prune_count": len(result.get("prune_analysis", {}).get("unused_terminal_resources", [])),
+    }
+    if not debug_mode:
+        result = {
+            "summary": result["summary"],
+            "optimization_candidates": result["optimization_candidates"],
+            "prune_analysis": result["prune_analysis"],
+        }
+    if original_eid != 0:
+        _seek_replay(state, original_eid)
+    return _result_response(request_id, result), True
+
+
 def _handle_preload(
     request_id: int, params: dict[str, Any], state: DaemonState
 ) -> tuple[dict[str, Any], bool]:
@@ -688,6 +802,7 @@ HANDLERS: dict[str, Handler] = {
     "pass": _handle_pass,
     "pass_deps": _handle_pass_deps,
     "pass_attachment": _handle_pass_attachment,
+    "tbr_analysis": _handle_tbr_analysis,
     "log": _handle_log,
     "info": _handle_info,
     "stats": _handle_stats,

@@ -56,6 +56,7 @@ from rdc.commands.shader_edit import (
     shader_restore_cmd,
 )
 from rdc.commands.snapshot import snapshot_cmd
+from rdc.commands.tbr import tbr_cmd
 from rdc.commands.tex_stats import tex_stats_cmd
 from rdc.commands.unix_helpers import count_cmd, shader_map_cmd
 from rdc.commands.usage import usage_cmd
@@ -150,6 +151,7 @@ main.add_command(assert_clean_cmd, name="assert-clean")
 main.add_command(assert_count_cmd, name="assert-count")
 main.add_command(assert_state_cmd, name="assert-state")
 main.add_command(snapshot_cmd, name="snapshot")
+main.add_command(tbr_cmd, name="tbr")
 main.add_command(debug_group, name="debug")
 main.add_command(shader_encodings_cmd, name="shader-encodings")
 main.add_command(shader_build_cmd, name="shader-build")

@@ -1082,6 +1082,17 @@ Show per-pass breakdown, top draws, largest resources.
 
 Show current daemon-backed session status.
 
+## `rdc tbr`
+
+Analyze event-level render-target switching for TBR optimization.
+
+**Options:**
+
+| Flag | Help | Type | Default |
+|------|------|------|---------|
+| `--json` | Output JSON. | flag |  |
+| `--debug` | Include debug details. | flag |  |
+
 ## `rdc tex-stats`
 
 Show texture min/max statistics and optional histogram.
