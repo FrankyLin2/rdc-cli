@@ -300,41 +300,44 @@ def _build_candidates(
     for flow in resource_flows:
         producer_segment = flow.get("producer_segment")
         producer_kind = str(flow.get("producer_kind", "attachment_write"))
-        for consumer in flow["consumers"]:
-            kind = consumer["kind"]
-            if kind == "sampled_read":
-                candidate_kind = _sampled_candidate_kind(producer_kind)
-            elif kind == "compute_read":
-                if producer_kind == "copy_write":
-                    candidate_kind = "copy_to_compute_candidate"
-                elif producer_kind == "resolve_write":
-                    candidate_kind = "resolve_to_compute_candidate"
-                elif producer_kind == "clear_write":
-                    candidate_kind = "clear_to_compute_candidate"
-                elif producer_kind == "genmips_write":
-                    candidate_kind = "genmips_to_compute_candidate"
-                else:
-                    candidate_kind = "compute_after_rt_production"
-            elif kind == "input_attachment_candidate":
-                candidate_kind = "input_attachment_candidate"
-            elif kind == "copy_read":
-                candidate_kind = "read_after_write_same_frame"
-            elif kind == "resolve_read":
-                candidate_kind = "read_after_write_same_frame"
-            else:
-                candidate_kind = "read_after_write_same_frame"
-            candidates.append(
-                {
-                    "kind": candidate_kind,
-                    "flow_id": flow.get("flow_id"),
-                    "resource_id": flow["resource_id"],
-                    "producer_kind": producer_kind,
-                    "producer_segment": producer_segment,
-                    "consumer_segment": consumer["segment_id"],
-                    "eid": consumer["eid"],
-                }
-            )
+        consumers = list(flow["consumers"])
+        if not consumers:
+            continue
+        candidates.append(
+            {
+                "kind": _aggregate_candidate_kind(producer_kind, consumers),
+                "flow_id": flow.get("flow_id"),
+                "resource_id": flow["resource_id"],
+                "producer_kind": producer_kind,
+                "producer_segment": producer_segment,
+                "consumer_count": len(consumers),
+                "consumer_segments": sorted(
+                    {str(consumer["segment_id"]) for consumer in consumers}
+                ),
+                "first_consumer_eid": min(int(consumer["eid"]) for consumer in consumers),
+                "last_consumer_eid": max(int(consumer["eid"]) for consumer in consumers),
+            }
+        )
     return candidates
+
+
+def _aggregate_candidate_kind(producer_kind: str, consumers: list[dict[str, Any]]) -> str:
+    consumer_kinds = {str(consumer["kind"]) for consumer in consumers}
+    if "sampled_read" in consumer_kinds:
+        return _sampled_candidate_kind(producer_kind)
+    if "compute_read" in consumer_kinds:
+        if producer_kind == "copy_write":
+            return "copy_to_compute_candidate"
+        if producer_kind == "resolve_write":
+            return "resolve_to_compute_candidate"
+        if producer_kind == "clear_write":
+            return "clear_to_compute_candidate"
+        if producer_kind == "genmips_write":
+            return "genmips_to_compute_candidate"
+        return "compute_after_rt_production"
+    if "input_attachment_candidate" in consumer_kinds:
+        return "input_attachment_candidate"
+    return "read_after_write_same_frame"
 
 
 def _is_flush_risk_switch(reasons: list[str]) -> bool:

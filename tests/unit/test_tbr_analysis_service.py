@@ -92,8 +92,12 @@ def test_resource_flow_marks_sampled_read_consumer() -> None:
 
     consumer = result["resource_flows"][0]["consumers"][0]
     assert consumer["kind"] == "sampled_read"
-    kinds = [item["kind"] for item in result["optimization_candidates"]]
-    assert "cross_pass_sampling_candidate" in kinds
+    candidate = result["optimization_candidates"][1]
+    assert candidate["kind"] == "cross_pass_sampling_candidate"
+    assert candidate["consumer_count"] == 1
+    assert candidate["consumer_segments"] == ["seg-0002"]
+    assert candidate["first_consumer_eid"] == 20
+    assert candidate["last_consumer_eid"] == 20
 
 
 def test_resource_flow_marks_compute_read_consumer() -> None:
@@ -276,6 +280,35 @@ def test_candidates_distinguish_clear_and_genmips_producers() -> None:
     }
     assert by_resource[701] == "clear_chain_candidate"
     assert by_resource[702] == "genmips_chain_candidate"
+
+
+def test_candidates_aggregate_multiple_consumers_for_same_flow() -> None:
+    actions = [_action(10), _action(20), _action(30)]
+    snapshots = {
+        10: _segment_snapshot(10, colors=[(0, 101)], framebuffer_key="fb-a"),
+        20: _segment_snapshot(20, colors=[(0, 102)], framebuffer_key="fb-b"),
+        30: _segment_snapshot(30, colors=[(0, 103)], framebuffer_key="fb-c"),
+    }
+    usage_map = {
+        101: [
+            _usage(10, 32),  # ColorTarget
+            _usage(20, 17),  # PS_Resource
+            _usage(30, 17),  # PS_Resource
+        ]
+    }
+
+    result = build_tbr_analysis(actions, snapshots, usage_map, capture="demo.rdc", current_eid=0)
+
+    candidates = [
+        candidate
+        for candidate in result["optimization_candidates"]
+        if candidate.get("flow_id") == "flow-0001"
+    ]
+    assert len(candidates) == 1
+    assert candidates[0]["consumer_count"] == 2
+    assert candidates[0]["consumer_segments"] == ["seg-0002", "seg-0003"]
+    assert candidates[0]["first_consumer_eid"] == 20
+    assert candidates[0]["last_consumer_eid"] == 30
 
 
 def test_prune_analysis_reports_unused_terminal_resources() -> None:
