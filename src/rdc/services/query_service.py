@@ -39,6 +39,29 @@ def _rid(value: Any) -> int:
     return int(value)
 
 
+def _is_marker_like_action(action: Any, name: str | None = None) -> bool:
+    flags = int(action.flags)
+    action_name = name if name is not None else getattr(action, "_name", "")
+    if _is_ignored_synthetic_marker(action_name):
+        return False
+    return bool(flags & _PUSH_MARKER) or (
+        bool(action.children)
+        and not (
+            flags
+            & (
+                _BEGIN_PASS
+                | _END_PASS
+                | _CMD_BUFFER
+                | _DRAWCALL
+                | _MESHDRAW
+                | _DISPATCH
+                | _CLEAR
+                | _COPY
+            )
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Action tree walking / filtering / stats
 # ---------------------------------------------------------------------------
@@ -123,22 +146,7 @@ def walk_actions(
 
         if a.children:
             child_markers = list(current_markers)
-            is_marker_like = bool(flags & _PUSH_MARKER) or (
-                bool(a.children)
-                and not (
-                    flags
-                    & (
-                        _BEGIN_PASS
-                        | _END_PASS
-                        | _CMD_BUFFER
-                        | _DRAWCALL
-                        | _MESHDRAW
-                        | _DISPATCH
-                        | _CLEAR
-                        | _COPY
-                    )
-                )
-            )
+            is_marker_like = _is_marker_like_action(a, name)
             if is_marker_like:
                 child_markers.append(name)
             marker = child_markers[-1] if child_markers else parent_marker
@@ -483,11 +491,18 @@ def _subtree_has_draws(action: Any) -> bool:
     return False
 
 
-def _window_stats(begin: Any, window: list[Any], sf: Any = None) -> dict[str, Any]:
+def _window_stats(
+    begin: Any,
+    window: list[Any],
+    sf: Any = None,
+    end: Any | None = None,
+) -> dict[str, Any]:
     """Aggregate stats for a render pass window (begin node + flat sibling list)."""
     name = begin.GetName(sf) if sf is not None else getattr(begin, "_name", "")
     draws = dispatches = triangles = 0
     eids = [begin.eventId] + [w.eventId for w in window]
+    if end is not None:
+        eids.append(end.eventId)
     min_eid, max_eid = min(eids), max(eids)
 
     def _walk(a: Any) -> None:
@@ -585,12 +600,16 @@ _SYNTHETIC_MARKER_IGNORE = frozenset(
 )
 
 
+def _is_ignored_synthetic_marker(name: str) -> bool:
+    return name in _SYNTHETIC_MARKER_IGNORE or name.startswith("=> ExecuteCommandLists(")
+
+
 def _synthetic_pass_name_for_action(a: FlatAction) -> str | None:
-    if a.pass_name != "-":
-        return a.pass_name
     for name in reversed(a.marker_stack):
-        if name not in _SYNTHETIC_MARKER_IGNORE and not name.startswith("glPopDebugGroup"):
+        if not _is_ignored_synthetic_marker(name) and not name.startswith("glPopDebugGroup"):
             return name
+    if a.pass_name != "-" and not _is_ignored_synthetic_marker(a.pass_name):
+        return a.pass_name
     return None
 
 
@@ -642,11 +661,31 @@ def get_effective_pass_list(
     *,
     flat: list[FlatAction] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return real passes when available, otherwise synthetic passes."""
-    passes = _build_pass_list(actions, sf)
-    if passes:
-        return passes
-    return build_synthetic_pass_list(flat if flat is not None else walk_actions(actions, sf))
+    """Return real passes first, then add uncovered synthetic marker passes."""
+    real_passes = _build_pass_list(actions, sf)
+    flat_actions = flat if flat is not None else walk_actions(actions, sf)
+    synthetic_passes = build_synthetic_pass_list(flat_actions)
+
+    if not real_passes:
+        return synthetic_passes
+
+    def _is_covered_by_real_pass(eid: int) -> bool:
+        return any(real["begin_eid"] <= eid <= real["end_eid"] for real in real_passes)
+
+    combined = list(real_passes)
+    for synthetic in synthetic_passes:
+        event_eids = [
+            a.eid
+            for a in flat_actions
+            if synthetic["begin_eid"] <= a.eid <= synthetic["end_eid"]
+            and a.flags & (_DRAWCALL | _MESHDRAW | _DISPATCH)
+        ]
+        if event_eids and all(_is_covered_by_real_pass(eid) for eid in event_eids):
+            continue
+        combined.append(synthetic)
+
+    combined.sort(key=lambda p: int(p["begin_eid"]))
+    return combined
 
 
 def _build_pass_list(actions: list[Any], sf: Any = None) -> list[dict[str, Any]]:
@@ -673,22 +712,33 @@ def _build_pass_list_recursive(
         if is_begin:
             api_name = a.GetName(sf) if sf is not None else getattr(a, "_name", "")
             if a.children:
-                # Children-of-BeginPass: real API and mock tree patterns
+                # Children-of-BeginPass: prefer the real pass window over nested markers.
                 content = a.children
-                marker_groups = [
-                    c for c in content if (int(c.flags) & _PUSH_MARKER) and _subtree_has_draws(c)
-                ]
-                if marker_groups:
-                    for g in marker_groups:
-                        passes.append(_subtree_stats(g, sf))
-                elif any(_subtree_has_draws(c) for c in content):
+                if any(_subtree_has_draws(c) for c in content):
                     entry = _subtree_stats(a, sf)
-                    if "(" in api_name:
+                    if i + 1 < len(actions) and int(actions[i + 1].flags) & _END_PASS:
+                        entry["end_eid"] = max(entry["end_eid"], int(actions[i + 1].eventId))
+                    marker_groups = [
+                        c
+                        for c in content
+                        if _is_marker_like_action(
+                            c, c.GetName(sf) if sf is not None else getattr(c, "_name", "")
+                        )
+                        and _subtree_has_draws(c)
+                    ]
+                    if len(marker_groups) == 1:
+                        entry["name"] = (
+                            marker_groups[0].GetName(sf)
+                            if sf is not None
+                            else getattr(marker_groups[0], "_name", "")
+                        )
+                    elif "(" in api_name:
                         entry["name"] = _friendly_pass_name(api_name, len(passes))
                     passes.append(entry)
                 i += 1
             else:
-                # Flat-sibling: collect window between BeginPass and EndPass
+                # Flat-sibling: collect window between BeginPass and EndPass and
+                # keep it as one real pass even if semantic markers exist inside.
                 window: list[Any] = []
                 j = i + 1
                 while j < len(actions):
@@ -696,15 +746,28 @@ def _build_pass_list_recursive(
                         break
                     window.append(actions[j])
                     j += 1
-                marker_groups = [
-                    c for c in window if (int(c.flags) & _PUSH_MARKER) and _subtree_has_draws(c)
-                ]
-                if marker_groups:
-                    for g in marker_groups:
-                        passes.append(_subtree_stats(g, sf))
-                elif any(_subtree_has_draws(c) for c in window):
-                    entry = _window_stats(a, window, sf)
-                    if "(" in api_name:
+                if any(_subtree_has_draws(c) for c in window):
+                    end = (
+                        actions[j]
+                        if j < len(actions) and int(actions[j].flags) & _END_PASS
+                        else None
+                    )
+                    entry = _window_stats(a, window, sf, end=end)
+                    marker_groups = [
+                        c
+                        for c in window
+                        if _is_marker_like_action(
+                            c, c.GetName(sf) if sf is not None else getattr(c, "_name", "")
+                        )
+                        and _subtree_has_draws(c)
+                    ]
+                    if len(marker_groups) == 1:
+                        entry["name"] = (
+                            marker_groups[0].GetName(sf)
+                            if sf is not None
+                            else getattr(marker_groups[0], "_name", "")
+                        )
+                    elif "(" in api_name:
                         entry["name"] = _friendly_pass_name(api_name, len(passes))
                     passes.append(entry)
                 i = j

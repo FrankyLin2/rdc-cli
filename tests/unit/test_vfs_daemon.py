@@ -573,11 +573,24 @@ def _make_state_with_targets():
     return state
 
 
+def _first_pass_name(state) -> str:
+    assert state.vfs_tree is not None
+    assert state.vfs_tree.pass_list
+    return str(state.vfs_tree.pass_list[0]["name"])
+
+
+def _first_pass_path_name(state) -> str:
+    assert state.vfs_tree is not None
+    assert state.vfs_tree.static["/passes"].children
+    return str(state.vfs_tree.static["/passes"].children[0])
+
+
 class TestVfsPassAttachments:
     def test_vfs_ls_pass_attachments_triggers_populate(self):
         state = _make_state_with_targets()
+        pass_name = _first_pass_path_name(state)
         resp, _ = _handle_request(
-            rpc_request("vfs_ls", {"path": "/passes/Shadow/attachments"}), state
+            rpc_request("vfs_ls", {"path": f"/passes/{pass_name}/attachments"}), state
         )
         result = resp["result"]
         assert result["kind"] == "dir"
@@ -587,8 +600,9 @@ class TestVfsPassAttachments:
 
     def test_vfs_tree_pass_attachments_populated(self):
         state = _make_state_with_targets()
+        pass_name = _first_pass_path_name(state)
         resp, _ = _handle_request(
-            rpc_request("vfs_tree", {"path": "/passes/Shadow", "depth": 2}), state
+            rpc_request("vfs_tree", {"path": f"/passes/{pass_name}", "depth": 2}), state
         )
         tree = resp["result"]["tree"]
         attach_node = next(c for c in tree["children"] if c["name"] == "attachments")

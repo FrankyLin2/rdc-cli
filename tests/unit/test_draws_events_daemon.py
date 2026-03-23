@@ -548,27 +548,36 @@ def _make_pass_attachment_state():
     return state
 
 
+def _first_pass_name(state) -> str:
+    assert state.vfs_tree is not None
+    assert state.vfs_tree.pass_list
+    return str(state.vfs_tree.pass_list[0]["name"])
+
+
 class TestPassAttachmentHandler:
     def test_returns_color_resource_id(self):
         state = _make_pass_attachment_state()
+        pass_name = _first_pass_name(state)
         resp, _ = _handle_request(
-            rpc_request("pass_attachment", {"name": "Shadow", "attachment": "color0"}), state
+            rpc_request("pass_attachment", {"name": pass_name, "attachment": "color0"}), state
         )
         assert "error" not in resp
         assert resp["result"]["resource_id"] == 300
 
     def test_returns_depth_resource_id(self):
         state = _make_pass_attachment_state()
+        pass_name = _first_pass_name(state)
         resp, _ = _handle_request(
-            rpc_request("pass_attachment", {"name": "Shadow", "attachment": "depth"}), state
+            rpc_request("pass_attachment", {"name": pass_name, "attachment": "depth"}), state
         )
         assert "error" not in resp
         assert resp["result"]["resource_id"] == 500
 
     def test_color_not_found(self):
         state = _make_pass_attachment_state()
+        pass_name = _first_pass_name(state)
         resp, _ = _handle_request(
-            rpc_request("pass_attachment", {"name": "Shadow", "attachment": "color99"}), state
+            rpc_request("pass_attachment", {"name": pass_name, "attachment": "color99"}), state
         )
         assert resp["error"]["code"] == -32001
 

@@ -17,6 +17,7 @@ from rdc.services.query_service import (
     filter_by_pattern,
     filter_by_type,
     find_action_by_eid,
+    get_effective_pass_list,
     get_pass_detail,
     get_top_draws,
     pipeline_row,
@@ -460,8 +461,8 @@ class TestBuildPassListFriendlyNames:
         assert passes[0]["name"] == "Colour Pass #1 (2 Targets)"
         assert not passes[0]["name"].startswith("vkCmd")
 
-    def test_preserves_marker_group_name(self) -> None:
-        """Marker groups inside BeginPass use marker name, not friendly pass name."""
+    def test_single_marker_group_names_the_real_pass(self) -> None:
+        """A real pass keeps its boundary but can borrow a single semantic marker name."""
         begin = ActionDescription(
             eventId=1,
             flags=ActionFlags.BeginPass | ActionFlags.PassBoundary,
@@ -606,6 +607,93 @@ class TestSyntheticPassList:
             ]
         )
         assert build_synthetic_pass_list(flat) == []
+
+    def test_prefers_deepest_semantic_marker_over_wrapper_pass_name(self) -> None:
+        from rdc.services.query_service import FlatAction
+
+        flat = [
+            FlatAction(
+                eid=10,
+                name="draw",
+                flags=ActionFlags.Drawcall,
+                num_indices=3,
+                pass_name="=> ExecuteCommandLists(1)[0]: Reset(ResourceId::1)",
+                marker_stack=["FrameTime.GPU", "Bloom", "RG_BloomPrefilter"],
+            )
+        ]
+
+        passes = build_synthetic_pass_list(flat)
+
+        assert [p["name"] for p in passes] == ["RG_BloomPrefilter"]
+
+
+class TestEffectivePassList:
+    def test_prefers_real_passes_but_adds_uncovered_marker_passes(self) -> None:
+        real_begin = ActionDescription(
+            eventId=10,
+            flags=ActionFlags.BeginPass | ActionFlags.PassBoundary,
+            _name="vkCmdBeginRenderPass(C=Load)",
+        )
+        real_draw = ActionDescription(
+            eventId=12,
+            flags=ActionFlags.Drawcall,
+            numIndices=3,
+            _name="vkCmdDraw",
+        )
+        real_end = ActionDescription(
+            eventId=20,
+            flags=ActionFlags.EndPass | ActionFlags.PassBoundary,
+            _name="EndPass",
+        )
+        ssao_draw = ActionDescription(
+            eventId=32,
+            flags=ActionFlags.Drawcall,
+            numIndices=3,
+            _name="vkCmdDraw",
+        )
+        ssao_marker = ActionDescription(
+            eventId=30,
+            flags=ActionFlags.PushMarker,
+            _name="SSAO",
+            children=[ssao_draw],
+        )
+
+        passes = get_effective_pass_list([real_begin, real_draw, real_end, ssao_marker])
+
+        assert [p["name"] for p in passes] == [
+            "Colour Pass #1 (1 Target)",
+            "SSAO",
+        ]
+
+    def test_does_not_split_real_pass_when_marker_is_inside_real_pass(self) -> None:
+        real_begin = ActionDescription(
+            eventId=10,
+            flags=ActionFlags.BeginPass | ActionFlags.PassBoundary,
+            _name="vkCmdBeginRenderPass(C=Load)",
+        )
+        inner_draw = ActionDescription(
+            eventId=15,
+            flags=ActionFlags.Drawcall,
+            numIndices=3,
+            _name="vkCmdDraw",
+        )
+        inner_marker = ActionDescription(
+            eventId=14,
+            flags=ActionFlags.PushMarker,
+            _name="SSAO",
+            children=[inner_draw],
+        )
+        real_end = ActionDescription(
+            eventId=20,
+            flags=ActionFlags.EndPass | ActionFlags.PassBoundary,
+            _name="EndPass",
+        )
+
+        passes = get_effective_pass_list([real_begin, inner_marker, real_end])
+
+        assert [p["name"] for p in passes] == ["SSAO"]
+        assert passes[0]["begin_eid"] == 10
+        assert passes[0]["end_eid"] == 20
 
 
 # ---------------------------------------------------------------------------
