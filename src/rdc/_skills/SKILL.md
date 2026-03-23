@@ -128,9 +128,8 @@ rdc tbr --debug | jq '.rt_switches[] | {at_eid, reasons}'
 Use `rdc tbr` when the goal is not "what RenderDoc thinks a pass is", but "where event-level RT changes, resource reuse, and terminal outputs suggest bandwidth-heavy TBR behavior". The command is conservative by design:
 
 - Default output is compact JSON with `summary`, `optimization_candidates`, and `prune_analysis`.
-- `--debug` adds `segments`, `rt_switches`, and `resource_flows` so you can inspect why candidates were emitted.
+- In most cases, do not pass `--debug`: it adds a lot of intermediate-process detail that is usually noise for optimization triage.
 - Segment boundaries are driven by attachment/state signature changes and draw-vs-dispatch transitions, not only by RenderDoc pass boundaries.
-- Candidate kinds are heuristics for follow-up investigation, not proof that a tile flush or store/load definitely happened.
 - `prune_analysis` highlights unused terminal resources and recursive prune waves that may reveal removable intermediate RT chains.
 
 ## CI Assertions
